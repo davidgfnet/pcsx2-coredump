@@ -36,6 +36,7 @@ class StateReader(object):
 			assert 'eeMemory.bin' in fd.namelist()
 			assert 'PCSX2 Internal Structures.dat' in fd.namelist()
 
+			self._threads = []
 			self._intdata = fd.read('PCSX2 Internal Structures.dat')
 
 			self._readtag(strpad(b"BIOS", 32))
@@ -43,6 +44,7 @@ class StateReader(object):
 			self._readtag(strpad(b"cpuRegs", 32))
 			self._mipsregs = self._parse_regs()
 			self._eemem = fd.read('eeMemory.bin')
+			self._currth = 1000
 
 		# Attempt to recover the threads and their state
 		# Hack taken from PCSX2 :)
@@ -61,12 +63,37 @@ class StateReader(object):
 			# Parse the 256 TCB entires for valid threads
 			for i in range(256):
 				addr = offset + i*19*4
-				_, _, status, pc, sp, gp, pr, ipr, wt, _, wc, _, _, ipc = struct.unpack(
-					"<IIIIIIHHIIIIII", self._eemem[addr:addr+52])
+				_, _, status, pc, sp, gp, pr, ipr, wt, _, wc, _, _, ipc, argc, argv, isp, ss = struct.unpack(
+					"<IIIIIIHHIIIIIIIIII", self._eemem[addr:addr+68])
 				# Pick only sleeping/waiting threads
-				if status != 0:  # and status != 1:
-					print("Found thread", status, hex(pc), hex(sp), hex(gp))
+				if status == 1:
+					self._currth = i
+				elif status != 0 and status != 1:
+					print("Found thread", "id", i, "status:", status, "pc:", hex(pc), "sp:", hex(sp),
+						"gp:", hex(gp), "init-sp:", hex(isp), "size:", ss)
+					th = {"id": i, "gpr": [], "fpr": [], "sa": 0, "hi": 0, "lo": 0}
+					# Parse the thread context, which lives at the top of the stack
+					for i in range(32):
+						reglo, reghi = struct.unpack("<QQ", self._eemem[sp+i*16:sp+(i+1)*16])
+						th["gpr"].append(reglo)
+					for i in range(32):
+						th["fpr"].append(struct.unpack("<I", self._eemem[512+sp+i*4:512+sp+(i+1)*4]))
 
+					# BIOS assumes $sp always aligned? And valid? Super scary to me :)
+					assert th["gpr"][29] == sp + 640
+
+					# Fix some stuff, since the layout is weird
+					th["sa"] = th["gpr"][0]  & 0xffffffff   # Stored here yeah
+					th["hi"] = th["gpr"][26] & 0xffffffffffffffff
+					th["lo"] = th["gpr"][27] & 0xffffffffffffffff
+
+					# Cleanup non preserved regs to avoid noise
+					th["gpr"][0] = 0
+					th["gpr"][26] = 0
+					th["gpr"][27] = 0
+
+					th["pc"] = pc
+					self._threads.append(th)
 
 	def _readtag(self, data):
 		if self._intdata[self._off:self._off + len(data)] != data:
@@ -107,6 +134,8 @@ class StateReader(object):
 rdr = StateReader(sys.argv[1])
 rdr.parse()
 
+oelf = ElfFile(e_type=ET_CORE, e_machine=EM_MIPS, e_flags=0x20920021)
+
 # Pack registers using the Linux order
 regdata  = b"".join(struct.pack("<Q", x) for x in rdr._mipsregs["gpr"])
 regdata += struct.pack("<Q", rdr._mipsregs["lo"])
@@ -117,9 +146,17 @@ regdata += struct.pack("<Q", rdr._mipsregs["cp0"][12])
 regdata += struct.pack("<Q", rdr._mipsregs["cp0"][13])
 while len(regdata) < 364:
 	regdata += b"\0"
+oelf.add_note_block(regdata, rdr._currth + 1)
 
-oelf = ElfFile(e_type=ET_CORE, e_machine=EM_MIPS, e_flags=0x20920021)
-oelf.add_note_block(regdata)
+for th in rdr._threads:
+	regdata = b"".join(struct.pack("<Q", x) for x in th["gpr"])
+	regdata += struct.pack("<Q", 0)
+	regdata += struct.pack("<Q", 0)
+	regdata += struct.pack("<Q", th["pc"])
+	while len(regdata) < 364:
+		regdata += b"\0"
+	oelf.add_note_block(regdata, th["id"]+1)
+
 oelf.add_mem_block(0x0,      0x0,      7, rdr._eemem[:0x100000])   # Bios
 oelf.add_mem_block(0x100000, 0x100000, 7, rdr._eemem[0x100000:])   # User RAM
 

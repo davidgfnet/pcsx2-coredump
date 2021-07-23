@@ -49,15 +49,15 @@ class ElfFile(object):
 	def add_mem_block(self, pvaddr, ppaddr, pflags, data):
 		self._add_program_header(PT_LOAD, pvaddr, ppaddr, pflags, data)
 
-	def add_note_block(self, regs):
+	def add_note_block(self, regs, pid):
 		# Add NT_PRPSINFO (3) with some fake info
 		info1 = struct.pack("<BBBBIII", 0, 0, 0, 0, 0, 1000, 1000)
-		info2 = struct.pack("<IIII", 1, 1, 1, 1)   # Pids/Gids
+		info2 = struct.pack("<IIII", pid, 1000, 1, 1)   # Pids/Gids
 		info3 = b"ps2-executable\0\0" + (b"\x00" * 80)
 
 		# Add NT_PRSTATUS (1) with register values
 		status1 = struct.pack("<IIIIII", 0, 0, 0, 0, 0, 0)   # Signals
-		status2 = struct.pack("<IIII", 1, 1, 1, 1) + (b"\0" * 32)  # Pids + Time
+		status2 = struct.pack("<IIII", pid, 1000, 1, 1) + (b"\0" * 32)  # Pids + Time
 		status3 = regs + b"\0\0\0\0"
 
 		data1 = wrap_note(b"CORE\0", NT_PRPSINFO, info1 + info2 + info3)
